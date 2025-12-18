@@ -1603,6 +1603,19 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi):
 
             self.binder = old_binder
 
+        # Restore the original generic signature for functions with constrained TypeVars.
+        # When TypeVars have value restrictions (e.g., TypeVar("T", str, bytes)), we expand
+        # them into concrete variants for checking. However, for decorator processing, we need
+        # to preserve the original polymorphic signature so that decorators can properly infer
+        # the constrained TypeVar instead of collapsing to the first variant.
+        if original_typ.variables and len(expanded) > 1:
+            has_constrained_tvars = any(
+                isinstance(tv, TypeVarType) and tv.values
+                for tv in original_typ.variables
+            )
+            if has_constrained_tvars:
+                defn.type = original_typ
+
     def require_correct_self_argument(self, func: Type, defn: FuncDef) -> bool:
         func = get_proper_type(func)
         if not isinstance(func, CallableType):
@@ -5508,6 +5521,33 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi):
                 object_type = self.lookup_type(d.expr)
                 fullname = self.expr_checker.method_fullname(object_type, d.name)
             self.check_for_untyped_decorator(e.func, dec, d)
+
+            # Before checking compatibility, unify matching constrained TypeVars
+            # between the decorator and decorated function to avoid spurious errors
+            adjusted_sig = sig
+            dec_proper = get_proper_type(dec)
+            sig_proper = get_proper_type(sig)
+            if isinstance(dec_proper, CallableType) and isinstance(sig_proper, CallableType):
+                if dec_proper.variables and sig_proper.variables:
+                    # Build a mapping from decorated function's TypeVars to decorator's TypeVars
+                    # for TypeVars with matching constraints
+                    typevar_map: dict[TypeVarId, Type] = {}
+                    for dec_tv in dec_proper.variables:
+                        if isinstance(dec_tv, TypeVarType) and dec_tv.values:
+                            # Find matching constrained TypeVar in the decorated function
+                            for sig_tv in sig_proper.variables:
+                                if isinstance(sig_tv, TypeVarType) and sig_tv.values:
+                                    # Check if constraints match
+                                    if (set(get_proper_type(v) for v in dec_tv.values) ==
+                                        set(get_proper_type(v) for v in sig_tv.values)):
+                                        typevar_map[sig_tv.id] = dec_tv
+                                        break
+
+                    # Apply the substitution to make the types compatible
+                    if typevar_map:
+                        adjusted_sig = expand_type(sig, typevar_map)
+
+            temp = self.temp_node(adjusted_sig, context=d)
             sig, t2 = self.expr_checker.check_call(
                 dec, [temp], [nodes.ARG_POS], e, callable_name=fullname, object_type=object_type
             )

@@ -744,3 +744,83 @@ def fn(w: W) -> W:
         reveal_type(w)  # N: Revealed type is "builtins.int"
     return w
 [builtins fixtures/isinstance.pyi]
+
+[case testDecoratorWithConstrainedTypeVarPreservesVariants]
+# Test that decorators with constrained TypeVars preserve the polymorphic signature
+# when applied using @decorator syntax. The decorator should maintain all constraint
+# values rather than collapsing to a single concrete type.
+from typing import TypeVar, Callable
+
+T = TypeVar("T", str, bytes)
+
+def decorator(fn: Callable[[T], T]) -> Callable[[T], T]:
+    def wrapped(data: T) -> T:
+        return fn(data)
+    return wrapped
+
+@decorator
+def process(data: T) -> T:
+    return data
+
+# Expected: Polymorphic signature with both str and bytes constraints preserved
+reveal_type(process)  # N: Revealed type is "def [T in (builtins.str, builtins.bytes)] (data: T`-1) -> T`-1"
+reveal_type(process("hello"))  # N: Revealed type is "builtins.str"
+reveal_type(process(b"world"))  # N: Revealed type is "builtins.bytes"
+process(123)  # E: Value of type variable "T" of "process" cannot be "int"
+[builtins fixtures/tuple.pyi]
+
+[case testDecoratorWithConstrainedTypeVarMultipleParams]
+# Test with multiple constrained TypeVars - both should be preserved
+from typing import TypeVar, Callable
+
+T = TypeVar("T", int, str)
+U = TypeVar("U", float, bool)
+
+def decorator(fn: Callable[[T, U], T]) -> Callable[[T, U], T]:
+    return fn
+
+@decorator
+def combine(x: T, y: U) -> T:
+    return x
+
+# Expected: Polymorphic signature with all constraints preserved
+reveal_type(combine)  # N: Revealed type is "def [T in (builtins.int, builtins.str), U in (builtins.float, builtins.bool)] (x: T`-1, y: U`-2) -> T`-1"
+reveal_type(combine(1, 1.5))  # N: Revealed type is "builtins.int"
+reveal_type(combine("a", True))  # N: Revealed type is "builtins.str"
+combine(1, "bad")  # E: Value of type variable "U" of "combine" cannot be "str"
+[builtins fixtures/tuple.pyi]
+
+[case testDecoratorWithConstrainedTypeVarAndParamSpec]
+# Test that decorators with ParamSpec and constrained TypeVars preserve the polymorphic
+# signature even when additional parameters are present.
+from typing import TypeVar, Callable, ParamSpec, reveal_type
+from typing_extensions import Concatenate
+T = TypeVar("T", str, bytes)
+P = ParamSpec("P")
+
+def decorator(fn: Callable[Concatenate[T, P], T]) -> Callable[Concatenate[T, P], T]:
+    def wrapped(data: T, *args: P.args, **kwargs: P.kwargs) -> T:
+        return fn(data, *args, **kwargs)
+    return wrapped
+
+@decorator
+def process_with_fn(data: T, fn: Callable[[T], T]) -> T:
+    return fn(data)
+
+# The constrained TypeVar is correctly preserved and all TypeVars are unified
+reveal_type(process_with_fn)  # N: Revealed type is "def [T in (builtins.str, builtins.bytes)] (data: T`-1, fn: def (T`-1) -> T`-1) -> T`-1"
+[builtins fixtures/tuple.pyi]
+
+[case testDecoratorWithConstrainedTypeVarIdentity]
+# This test shows that passing a function as an argument (not using @decorator)
+# works differently - it can infer Any for the lambda
+from typing import TypeVar, Callable
+
+T = TypeVar("T", str, bytes)
+
+def dec(f: Callable[[T], T]) -> Callable[[T], T]:
+    return f
+
+x = dec(lambda data: data)
+reveal_type(x)  # N: Revealed type is "def (Any) -> Any"
+[builtins fixtures/tuple.pyi]
