@@ -1603,6 +1603,18 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi):
 
             self.binder = old_binder
 
+        # Restore the original generic signature for functions with constrained TypeVars.
+        # When TypeVars have value restrictions (e.g., TypeVar("T", str, bytes)), we expand
+        # them into concrete variants for checking. However, for decorator processing, we need
+        # to preserve the original polymorphic signature so that decorators can properly infer
+        # the constrained TypeVar instead of collapsing to the first variant.
+        if original_typ.variables and len(expanded) > 1:
+            has_constrained_tvars = any(
+                isinstance(tv, TypeVarType) and tv.values for tv in original_typ.variables
+            )
+            if has_constrained_tvars:
+                defn.type = original_typ
+
     def require_correct_self_argument(self, func: Type, defn: FuncDef) -> bool:
         func = get_proper_type(func)
         if not isinstance(func, CallableType):
