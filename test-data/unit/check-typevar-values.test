@@ -744,3 +744,72 @@ def fn(w: W) -> W:
         reveal_type(w)  # N: Revealed type is "builtins.int"
     return w
 [builtins fixtures/isinstance.pyi]
+
+[case testDecoratorWithConstrainedTypeVarPreservesVariants]
+# Test that decorators with constrained TypeVars preserve the polymorphic signature
+# when applied using @decorator syntax. The decorator should maintain all constraint
+# values rather than collapsing to a single concrete type.
+from typing import TypeVar, Callable
+
+T = TypeVar("T", str, bytes)
+
+def decorator(fn: Callable[[T], T]) -> Callable[[T], T]:
+    def wrapped(data: T) -> T:
+        return fn(data)
+    return wrapped
+
+@decorator
+def process(data: T) -> T:
+    return data
+
+# Expected: Polymorphic signature with both str and bytes constraints preserved
+reveal_type(process)  # N: Revealed type is "def [T in (builtins.str, builtins.bytes)] (data: T`-1) -> T`-1"
+reveal_type(process("hello"))  # N: Revealed type is "builtins.str"
+reveal_type(process(b"world"))  # N: Revealed type is "builtins.bytes"
+process(123)  # E: Value of type variable "T" of "process" cannot be "int"
+[builtins fixtures/tuple.pyi]
+
+[case testDecoratorWithConstrainedTypeVarMultipleParams]
+# Test with multiple constrained TypeVars - both should be preserved
+from typing import TypeVar, Callable
+
+T = TypeVar("T", int, str)
+U = TypeVar("U", float, bool)
+
+def decorator(fn: Callable[[T, U], T]) -> Callable[[T, U], T]:
+    return fn
+
+@decorator
+def combine(x: T, y: U) -> T:
+    return x
+
+# Expected: Polymorphic signature with all constraints preserved
+reveal_type(combine)  # N: Revealed type is "def [T in (builtins.int, builtins.str), U in (builtins.float, builtins.bool)] (x: T`-1, y: U`-2) -> T`-1"
+reveal_type(combine(1, 1.5))  # N: Revealed type is "builtins.int"
+reveal_type(combine("a", True))  # N: Revealed type is "builtins.str"
+combine(1, "bad")  # E: Value of type variable "U" of "combine" cannot be "str"
+[builtins fixtures/tuple.pyi]
+
+[case testTwoTypeVarsWithSameConstraintsNotMixedUp]
+# Test that two TypeVars with identical constraints don't get mixed up.
+# T and U both have (str, bytes) constraints but should remain distinct.
+from typing import TypeVar, Callable
+
+T = TypeVar("T", str, bytes)
+U = TypeVar("U", str, bytes)
+
+def decorator(fn: Callable[[T, U], tuple[T, U]]) -> Callable[[T, U], tuple[T, U]]:
+    return fn
+
+@decorator
+def combine(x: T, y: U) -> tuple[T, U]:
+    return (x, y)
+
+# Expected: Both T and U are preserved as separate TypeVars
+reveal_type(combine)  # N: Revealed type is "def [T in (builtins.str, builtins.bytes), U in (builtins.str, builtins.bytes)] (x: T`-1, y: U`-2) -> tuple[T`-1, U`-2]"
+# Both arguments can be different types
+reveal_type(combine("hello", b"world"))  # N: Revealed type is "tuple[builtins.str, builtins.bytes]"
+reveal_type(combine(b"hello", "world"))  # N: Revealed type is "tuple[builtins.bytes, builtins.str]"
+# Same type for both is also valid
+reveal_type(combine("a", "b"))  # N: Revealed type is "tuple[builtins.str, builtins.str]"
+[builtins fixtures/tuple.pyi]

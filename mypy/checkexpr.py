@@ -2082,6 +2082,25 @@ class ExpressionChecker(ExpressionVisitor[Type], ExpressionCheckerSharedApi):
 
         Return a derived callable type that has the arguments applied.
         """
+
+        def find_matching_typevar(
+            arg_tv: TypeVarType, callee_vars: Sequence[TypeVarLikeType], used: set[int]
+        ) -> int | None:
+            """Find index of matching constrained TypeVar in callee, or None."""
+            arg_constraints = frozenset(get_proper_type(v) for v in arg_tv.values)
+            for idx, cv in enumerate(callee_vars):
+                if idx in used:
+                    continue
+                if not isinstance(cv, TypeVarType) or not cv.values:
+                    continue
+                if frozenset(get_proper_type(v) for v in cv.values) == arg_constraints:
+                    return idx
+            return None
+
+        # Save the original callee_type variables before inference modifies them
+        original_callee_variables = list(callee_type.variables)
+        constrained_typevar_map: dict[int, TypeVarType] = {}
+
         if self.chk.in_checked_function():
             # Disable type errors during type inference. There may be errors
             # due to partial available context information at this time, but
@@ -2112,6 +2131,27 @@ class ExpressionChecker(ExpressionVisitor[Type], ExpressionCheckerSharedApi):
                 context=self.argument_infer_context(),
                 strict=self.chk.in_checked_function(),
             )
+
+            # Preserve constrained TypeVars when passing functions with constrained TypeVars
+            # to decorators. When the argument has constrained TypeVars, save the decorator's
+            # corresponding TypeVar (from original_callee_variables) to apply at the end.
+            used_callee_var_indices: set[int] = set()
+            for arg_type in arg_types:
+                arg_type_proper = get_proper_type(arg_type)
+                if not isinstance(arg_type_proper, CallableType):
+                    continue
+                for arg_typevar in arg_type_proper.variables:
+                    if not (isinstance(arg_typevar, TypeVarType) and arg_typevar.values):
+                        continue
+                    # Found a constrained TypeVar in the argument - find matching decorator TypeVar
+                    match_idx = find_matching_typevar(
+                        arg_typevar, original_callee_variables, used_callee_var_indices
+                    )
+                    if match_idx is not None:
+                        callee_var = original_callee_variables[match_idx]
+                        assert isinstance(callee_var, TypeVarType)
+                        constrained_typevar_map[match_idx] = callee_var
+                        used_callee_var_indices.add(match_idx)
 
             if 2 in arg_pass_nums:
                 # Second pass of type inference.
@@ -2203,7 +2243,90 @@ class ExpressionChecker(ExpressionVisitor[Type], ExpressionCheckerSharedApi):
             # In dynamically typed functions use implicit 'Any' types for
             # type variables.
             inferred_args = [AnyType(TypeOfAny.unannotated)] * len(callee_type.variables)
+
+        # Apply constrained TypeVars saved earlier
+        for callee_var_idx, constrained_tv in constrained_typevar_map.items():
+            if callee_var_idx >= len(inferred_args):
+                continue
+            inferred = inferred_args[callee_var_idx]
+            # Replace if inference failed
+            if inferred is None or isinstance(get_proper_type(inferred), UninhabitedType):
+                inferred_args[callee_var_idx] = constrained_tv
+                continue
+            # Replace if collapsed to a single constraint
+            if not constrained_tv.values:
+                continue
+            inferred_proper = get_proper_type(inferred)
+            if any(inferred_proper == get_proper_type(c) for c in constrained_tv.values):
+                inferred_args[callee_var_idx] = constrained_tv
+
+        # If we have constrained TypeVars, try polymorphic application
+        has_constrained = any(isinstance(a, TypeVarType) and a.values for a in inferred_args if a)
+        if constrained_typevar_map and has_constrained:
+            free_tvars = [a for a in inferred_args if isinstance(a, TypeVarType)]
+            poly_callee = self.apply_generic_arguments(callee_type, inferred_args, context)
+            poly_result = applytype.apply_poly(poly_callee, free_tvars)
+            if poly_result is not None:
+                poly_result = self._finalize_poly_result(
+                    poly_result, arg_types, free_tvars, constrained_typevar_map
+                )
+                freeze_all_type_vars(poly_result)
+                return poly_result
+
         return self.apply_inferred_arguments(callee_type, inferred_args, context)
+
+    def _finalize_poly_result(
+        self,
+        poly_result: CallableType,
+        arg_types: list[Type],
+        free_tvars: list[TypeVarType],
+        constrained_typevar_map: dict[int, TypeVarType],
+    ) -> CallableType:
+        """Finalize polymorphic result by preserving arg names and substituting TypeVars."""
+        ret_type = poly_result.ret_type
+        if not isinstance(ret_type, CallableType):
+            return poly_result
+
+        first_arg_type = get_proper_type(arg_types[0]) if arg_types else None
+        if not isinstance(first_arg_type, CallableType):
+            return poly_result
+
+        # Copy arg_names if arity matches
+        if first_arg_type.arg_names and len(ret_type.arg_types) == len(first_arg_type.arg_types):
+            ret_type = ret_type.copy_modified(arg_names=first_arg_type.arg_names)
+
+        # Substitute decorated function's TypeVars with decorator's TypeVars
+        if first_arg_type.variables:
+            variables_map = self._build_typevar_substitution_map(
+                first_arg_type, free_tvars, constrained_typevar_map
+            )
+            if variables_map:
+                ret_type = expand_type(ret_type, variables_map)
+
+        return poly_result.copy_modified(ret_type=ret_type)
+
+    def _build_typevar_substitution_map(
+        self,
+        first_arg_type: CallableType,
+        free_tvars: list[TypeVarType],
+        constrained_typevar_map: dict[int, TypeVarType],
+    ) -> dict[TypeVarId, Type]:
+        """Build substitution map from decorated function's TypeVars to decorator's TypeVars."""
+        variables_map: dict[TypeVarId, Type] = {}
+        for callee_idx in constrained_typevar_map:
+            if callee_idx >= len(free_tvars):
+                continue
+            decorator_typevar = free_tvars[callee_idx]
+            if not decorator_typevar.values:
+                continue
+            decorator_constraints = frozenset(get_proper_type(v) for v in decorator_typevar.values)
+            for func_tv in first_arg_type.variables:
+                if not (isinstance(func_tv, TypeVarType) and func_tv.values):
+                    continue
+                func_constraints = frozenset(get_proper_type(v) for v in func_tv.values)
+                if func_constraints == decorator_constraints:
+                    variables_map[func_tv.id] = decorator_typevar
+        return variables_map
 
     def infer_function_type_arguments_pass2(
         self,
