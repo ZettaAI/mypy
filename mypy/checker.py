@@ -5530,17 +5530,27 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi):
             if isinstance(dec_proper, CallableType) and isinstance(sig_proper, CallableType):
                 if dec_proper.variables and sig_proper.variables:
                     # Build a mapping from decorated function's TypeVars to decorator's TypeVars
-                    # for TypeVars with matching constraints
+                    # for TypeVars with matching constraints. Track used TypeVars to avoid
+                    # mapping multiple function TypeVars with the same constraints to the same
+                    # decorator TypeVar.
                     typevar_map: dict[TypeVarId, Type] = {}
+                    used_sig_tvs: set[TypeVarId] = set()
                     for dec_tv in dec_proper.variables:
                         if isinstance(dec_tv, TypeVarType) and dec_tv.values:
-                            # Find matching constrained TypeVar in the decorated function
+                            dec_constraints = frozenset(
+                                get_proper_type(v) for v in dec_tv.values
+                            )
+                            # Find first UNUSED matching constrained TypeVar in the decorated function
                             for sig_tv in sig_proper.variables:
+                                if sig_tv.id in used_sig_tvs:
+                                    continue  # Already mapped to another decorator TypeVar
                                 if isinstance(sig_tv, TypeVarType) and sig_tv.values:
-                                    # Check if constraints match
-                                    if (set(get_proper_type(v) for v in dec_tv.values) ==
-                                        set(get_proper_type(v) for v in sig_tv.values)):
+                                    sig_constraints = frozenset(
+                                        get_proper_type(v) for v in sig_tv.values
+                                    )
+                                    if dec_constraints == sig_constraints:
                                         typevar_map[sig_tv.id] = dec_tv
+                                        used_sig_tvs.add(sig_tv.id)
                                         break
 
                     # Apply the substitution to make the types compatible

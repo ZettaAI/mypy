@@ -824,3 +824,51 @@ def dec(f: Callable[[T], T]) -> Callable[[T], T]:
 x = dec(lambda data: data)
 reveal_type(x)  # N: Revealed type is "def (Any) -> Any"
 [builtins fixtures/tuple.pyi]
+
+[case testOverloadedDecoratorWithConstrainedTypeVar]
+# Test that overloaded decorators work correctly with constrained TypeVar functions.
+# The decorator is overloaded for str and bytes, and the function has a constrained TypeVar.
+from typing import TypeVar, Callable, overload
+
+T = TypeVar("T", str, bytes)
+
+@overload
+def decorator(fn: Callable[[str], str]) -> Callable[[str], str]: ...
+@overload
+def decorator(fn: Callable[[bytes], bytes]) -> Callable[[bytes], bytes]: ...
+def decorator(fn: Callable[[T], T]) -> Callable[[T], T]:
+    return fn
+
+@decorator
+def process(data: T) -> T:
+    return data
+
+# Expected: Overloaded type with both str and bytes variants
+reveal_type(process)  # N: Revealed type is "Overload(def (builtins.str) -> builtins.str, def (builtins.bytes) -> builtins.bytes)"
+reveal_type(process("hello"))  # N: Revealed type is "builtins.str"
+reveal_type(process(b"world"))  # N: Revealed type is "builtins.bytes"
+[builtins fixtures/tuple.pyi]
+
+[case testTwoTypeVarsWithSameConstraintsNotMixedUp]
+# Test that two TypeVars with identical constraints don't get mixed up.
+# T and U both have (str, bytes) constraints but should remain distinct.
+from typing import TypeVar, Callable
+
+T = TypeVar("T", str, bytes)
+U = TypeVar("U", str, bytes)
+
+def decorator(fn: Callable[[T, U], tuple[T, U]]) -> Callable[[T, U], tuple[T, U]]:
+    return fn
+
+@decorator
+def combine(x: T, y: U) -> tuple[T, U]:
+    return (x, y)
+
+# Expected: Both T and U are preserved as separate TypeVars
+reveal_type(combine)  # N: Revealed type is "def [T in (builtins.str, builtins.bytes), U in (builtins.str, builtins.bytes)] (x: T`-1, y: U`-2) -> tuple[T`-1, U`-2]"
+# Both arguments can be different types
+reveal_type(combine("hello", b"world"))  # N: Revealed type is "tuple[builtins.str, builtins.bytes]"
+reveal_type(combine(b"hello", "world"))  # N: Revealed type is "tuple[builtins.bytes, builtins.str]"
+# Same type for both is also valid
+reveal_type(combine("a", "b"))  # N: Revealed type is "tuple[builtins.str, builtins.str]"
+[builtins fixtures/tuple.pyi]
