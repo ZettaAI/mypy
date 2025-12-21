@@ -1461,6 +1461,82 @@ class ExpressionChecker(ExpressionVisitor[Type], ExpressionCheckerSharedApi):
             return None
         return Overloaded(result), Overloaded(inferred_args)
 
+    def is_overload_decorator_constrained_call(
+        self, callee: Overloaded, args: list[Expression]
+    ) -> CallableType | None:
+        """Check if an overloaded callable is applied to a constrained TypeVar argument.
+
+        Returns the constrained CallableType if detected, None otherwise.
+        This handles the reverse case of is_generic_decorator_overload_call:
+        instead of a generic decorator applied to an overloaded function,
+        this detects an overloaded decorator applied to a function with constrained TypeVars.
+        """
+        if len(args) != 1:
+            return None  # Only handle single-argument case (decorator pattern)
+
+        # Check if overload items look like decorator signatures (Callable -> Callable)
+        for item in callee.items:
+            if len(item.arg_types) != 1:
+                return None
+            if not isinstance(get_proper_type(item.arg_types[0]), CallableType):
+                return None
+            if not isinstance(get_proper_type(item.ret_type), CallableType):
+                return None
+
+        # Get the argument type
+        with self.chk.local_type_map:
+            with self.msg.filter_errors():
+                arg_type = get_proper_type(self.accept(args[0], type_context=None))
+
+        if isinstance(arg_type, CallableType) and self.has_constrained_typevars(arg_type):
+            return arg_type
+        return None
+
+    def has_constrained_typevars(self, t: Type) -> bool:
+        """Check if a type is a CallableType with constrained TypeVars."""
+        t = get_proper_type(t)
+        if not isinstance(t, CallableType):
+            return False
+        return any(isinstance(tv, TypeVarType) and tv.values for tv in t.variables)
+
+    def handle_overload_decorator_constrained_call(
+        self, callee: Overloaded, constrained_arg: CallableType, ctx: Context
+    ) -> tuple[Type, Type] | None:
+        """Handle application of overloaded decorator to constrained TypeVar function.
+
+        Expands the constrained function to its variants, matches each against
+        the overload, and combines results into an Overloaded type.
+        """
+        # Expand the constrained callable into its variants
+        variants = mypy.checker.expand_callable_variants(constrained_arg)
+        if len(variants) <= 1:
+            return None  # No expansion needed, fall back to normal handling
+
+        results: list[CallableType] = []
+        inferred_args: list[CallableType] = []
+
+        for variant in variants:
+            arg = TempNode(typ=variant)
+            # Try matching this variant against the overloaded decorator
+            with self.msg.filter_errors() as err:
+                result, _ = self.check_call(callee, [arg], [ARG_POS], ctx)
+            if err.has_new_errors():
+                # This variant doesn't match any overload
+                continue
+            p_result = get_proper_type(result)
+            if isinstance(p_result, CallableType):
+                results.append(p_result)
+                inferred_args.append(variant)
+
+        if not results:
+            return None
+
+        if len(results) == 1:
+            return results[0], inferred_args[0]
+
+        # Combine results into an Overloaded type
+        return Overloaded(results), Overloaded(inferred_args)
+
     def check_call_expr_with_callee_type(
         self,
         callee_type: Type,
@@ -1596,6 +1672,14 @@ class ExpressionChecker(ExpressionVisitor[Type], ExpressionCheckerSharedApi):
                 object_type,
             )
         elif isinstance(callee, Overloaded):
+            # Check for constrained TypeVar argument (reverse of decorator overload call)
+            constrained_arg = self.is_overload_decorator_constrained_call(callee, args)
+            if constrained_arg is not None:
+                result = self.handle_overload_decorator_constrained_call(
+                    callee, constrained_arg, context
+                )
+                if result is not None:
+                    return result
             return self.check_overload_call(
                 callee, args, arg_kinds, arg_names, callable_name, object_type, context
             )
