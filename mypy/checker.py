@@ -1613,7 +1613,23 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi):
                 isinstance(tv, TypeVarType) and tv.values for tv in original_typ.variables
             )
             if has_constrained_tvars:
-                defn.type = original_typ
+                restored_typ = original_typ
+                # If @types.coroutine or @asyncio.coroutine was applied, we need to preserve
+                # the AwaitableGenerator wrapper while also restoring the polymorphic signature.
+                if defn.is_awaitable_coroutine:
+                    t = original_typ.ret_type
+                    c = defn.is_coroutine
+                    ty = self.get_generator_yield_type(t, c)
+                    tc = self.get_generator_receive_type(t, c)
+                    if c:
+                        tr = self.get_coroutine_return_type(t)
+                    else:
+                        tr = self.get_generator_return_type(t, c)
+                    ret_type = self.named_generic_type(
+                        "typing.AwaitableGenerator", [ty, tc, tr, t]
+                    )
+                    restored_typ = original_typ.copy_modified(ret_type=ret_type)
+                defn.type = restored_typ
 
     def require_correct_self_argument(self, func: Type, defn: FuncDef) -> bool:
         func = get_proper_type(func)

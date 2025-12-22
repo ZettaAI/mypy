@@ -837,3 +837,4 @@ reveal_type(process)  # N: Revealed type is "Overload(def (builtins.str) -> buil
 reveal_type(process("hello"))  # N: Revealed type is "builtins.str"
 reveal_type(process(b"world"))  # N: Revealed type is "builtins.bytes"
 [builtins fixtures/tuple.pyi]
+
