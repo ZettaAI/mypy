@@ -1065,6 +1065,26 @@ reveal_type(coro)  # N: Revealed type is "def () -> typing.AwaitableGenerator[bu
 [builtins fixtures/async_await.pyi]
 [typing fixtures/typing-async.pyi]
 
+[case testCoroutineDecoratorWithConstrainedTypeVar]
+# Test that @types.coroutine preserves both the AwaitableGenerator wrapper
+# and the constrained TypeVar polymorphic signature.
+from typing import Generator, TypeVar
+from types import coroutine
+
+T = TypeVar("T", int, str)
+
+@coroutine
+def process(data: T) -> Generator[T, None, T]:
+    yield data
+    return data
+
+# Expected: AwaitableGenerator with polymorphic T preserved
+reveal_type(process)  # N: Revealed type is "def [T in (builtins.int, builtins.str)] (data: T`-1) -> typing.AwaitableGenerator[T`-1, None, T`-1, typing.Generator[T`-1, None, T`-1]]"
+reveal_type(process(1))  # N: Revealed type is "typing.AwaitableGenerator[builtins.int, None, builtins.int, typing.Generator[builtins.int, None, builtins.int]]"
+reveal_type(process("hello"))  # N: Revealed type is "typing.AwaitableGenerator[builtins.str, None, builtins.str, typing.Generator[builtins.str, None, builtins.str]]"
+[builtins fixtures/async_await.pyi]
+[typing fixtures/typing-async.pyi]
+
 [case asyncIteratorInProtocol]
 from typing import AsyncIterator, Protocol
 

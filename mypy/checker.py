@@ -1603,6 +1603,34 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi):
 
             self.binder = old_binder
 
+        # Restore the original generic signature for functions with constrained TypeVars.
+        # When TypeVars have value restrictions (e.g., TypeVar("T", str, bytes)), we expand
+        # them into concrete variants for checking. However, for decorator processing, we need
+        # to preserve the original polymorphic signature so that decorators can properly infer
+        # the constrained TypeVar instead of collapsing to the first variant.
+        if original_typ.variables and len(expanded) > 1:
+            has_constrained_tvars = any(
+                isinstance(tv, TypeVarType) and tv.values for tv in original_typ.variables
+            )
+            if has_constrained_tvars:
+                restored_typ = original_typ
+                # If @types.coroutine or @asyncio.coroutine was applied, we need to preserve
+                # the AwaitableGenerator wrapper while also restoring the polymorphic signature.
+                if defn.is_awaitable_coroutine:
+                    t = original_typ.ret_type
+                    c = defn.is_coroutine
+                    ty = self.get_generator_yield_type(t, c)
+                    tc = self.get_generator_receive_type(t, c)
+                    if c:
+                        tr = self.get_coroutine_return_type(t)
+                    else:
+                        tr = self.get_generator_return_type(t, c)
+                    ret_type = self.named_generic_type(
+                        "typing.AwaitableGenerator", [ty, tc, tr, t]
+                    )
+                    restored_typ = original_typ.copy_modified(ret_type=ret_type)
+                defn.type = restored_typ
+
     def require_correct_self_argument(self, func: Type, defn: FuncDef) -> bool:
         func = get_proper_type(func)
         if not isinstance(func, CallableType):
@@ -5477,6 +5505,26 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi):
     def visit_decorator_inner(
         self, e: Decorator, allow_empty: bool = False, skip_first_item: bool = False
     ) -> None:
+        def build_typevar_map(dec: CallableType, sig: CallableType) -> dict[TypeVarId, Type]:
+            """Build TypeVar substitution map for matching constrained TypeVars."""
+            result: dict[TypeVarId, Type] = {}
+            used_sig_tvs: set[TypeVarId] = set()
+            for dec_tv in dec.variables:
+                if not (isinstance(dec_tv, TypeVarType) and dec_tv.values):
+                    continue
+                dec_constraints = frozenset(get_proper_type(v) for v in dec_tv.values)
+                for sig_tv in sig.variables:
+                    if sig_tv.id in used_sig_tvs:
+                        continue
+                    if not (isinstance(sig_tv, TypeVarType) and sig_tv.values):
+                        continue
+                    sig_constraints = frozenset(get_proper_type(v) for v in sig_tv.values)
+                    if dec_constraints == sig_constraints:
+                        result[sig_tv.id] = dec_tv
+                        used_sig_tvs.add(sig_tv.id)
+                        break
+            return result
+
         if self.recurse_into_functions:
             with self.tscope.function_scope(e.func):
                 self.check_func_item(e.func, name=e.func.name, allow_empty=allow_empty)
@@ -5508,6 +5556,18 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi):
                 object_type = self.lookup_type(d.expr)
                 fullname = self.expr_checker.method_fullname(object_type, d.name)
             self.check_for_untyped_decorator(e.func, dec, d)
+
+            # Before checking compatibility, unify matching constrained TypeVars
+            # between the decorator and decorated function to avoid spurious errors
+            adjusted_sig = sig
+            dec_proper = get_proper_type(dec)
+            sig_proper = get_proper_type(sig)
+            if isinstance(dec_proper, CallableType) and isinstance(sig_proper, CallableType):
+                typevar_map = build_typevar_map(dec_proper, sig_proper)
+                if typevar_map:
+                    adjusted_sig = expand_type(sig, typevar_map)
+
+            temp = self.temp_node(adjusted_sig, context=d)
             sig, t2 = self.expr_checker.check_call(
                 dec, [temp], [nodes.ARG_POS], e, callable_name=fullname, object_type=object_type
             )
